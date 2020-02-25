@@ -12,7 +12,7 @@ h=6.63E-34
 c=3E+8
 cen_wav_r= 658E-9
 dist_pl_pc=150
-
+'''This code plots a g-r vs r colour magnitude diagram and determines associated properties. Needs tweaking in order to plot and process g-r vs g'''
 
 def get_abs_mag(app_mag):
     return(app_mag-5*np.log10(dist_pl_pc/10))
@@ -70,13 +70,13 @@ def get_distance(param,param_pl,color_gr,g_r_pl):
         y_diff=abs(y_pl -y_m52)
         shift_list.append(y_diff)
 
-    dist_mod=10.7#np.mean(shift_list)
+    dist_mod=np.mean(shift_list)
     print(dist_mod)
     exponent=((dist_mod/5)+1)
     distance= 10**(exponent)
     return(distance,dist_mod)
 
-def get_age(flux,distnace):
+def get_age(flux,distance):
     r_min_lum=flux*(4*np.pi*(distance**2))
     r_min_mass= (r_min_lum/solar_lum)**(1/3)
     age= (r_min_mass**-2.5)* (10**10)
