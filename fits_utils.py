@@ -123,10 +123,12 @@ def load_fits(**kwargs):
         for filename in files:
             if "left" in filename:
                 pass
-            elif "attempt" in filename:
+            elif "at" in filename:
+                pass
+            elif "end" in filename:
                 pass
             elif target_id in filename and band in filename:
-                int_time = filename.split("_")[2][:-1]
+                int_time = int(filename.split("_")[2][:-1])
                 print(target_id, band, int_time, " matched ", filename)
                 with fits.open(root+filename) as hdul:
                     new_image = {}
@@ -199,6 +201,18 @@ def average_frame(filelist, **kwargs):
         return average
 
 def write_out_fits(image, filename):
+    """
+    Creates a header for an ndarray of reduced data and then creates a new fits
+    file of this data.
+
+    Args:
+        image (ndarray): reduced data to be written to fits file.
+        filename (string): name (and location) of new fits file.
+    """
+    hdul = fits.HDUList([fits.PrimaryHDU(image)])
+    hdul.writeto(filename, overwrite=True)
+
+def write_out_fits_2(image, filename):
     """
     Creates a header for an ndarray of reduced data and then creates a new fits
     file of this data.
@@ -366,6 +380,8 @@ def align(images, **kwargs):
         aligned_images (list of dict): new frames that have been aligned and can
             be stacked.
     """
+    # Which centroiding function to use.
+    centroid_func = kwargs.get("centroid")
     # Boolean, whether or not to mask images for hot pixels on the detector.
     filter = kwargs.get("filter")
     # Find the centroid of the reference star in each image.
@@ -375,7 +391,7 @@ def align(images, **kwargs):
     for image in images:
         counter += 1
         print("---Finding Centre {} of {}".format(counter, len(images)), end="\r")
-        centroid = max_value_centroid(image["data"], size=50, filter=filter)
+        centroid = centroid_func(image["data"], size=50, filter=filter)
         x_centroids.append(centroid[0])
         y_centroids.append(centroid[1])
         image["XCENT"] = centroid[0]
@@ -407,23 +423,31 @@ def align(images, **kwargs):
         #     plt.savefig("r_max_margin_1.jpeg", bbox_inches="tight", pad_inches=0, dpi=1000)
 
     print()
-    max_pos = (max(x_centroids), max(y_centroids))
-    min_pos = (min(x_centroids), min(y_centroids))
-    max_dif = (max_pos[0]-min_pos[0], max_pos[1]-min_pos[1])
+    max_pos_x, max_pos_y = max(x_centroids), max(y_centroids)
+    min_pos_x, min_pos_y = min(x_centroids), min(y_centroids)
+    max_dif_x, max_dif_y = max_pos_x - min_pos_x, max_pos_y - min_pos_y
     # Create new stack of aligned images using the centroid in each frame.
     aligned_images = []
+    counter = 0
     for image in images:
+        counter += 1
+        print("---Aligning Image {} of {}".format(counter, len(images)), end="\r")
+        # Determine region in which to cast the image.
+        disp_x, disp_y = max_pos_x - image["XCENT"], max_pos_y - image["YCENT"]
+        imsize_x, imsize_y = image["data"].shape[0], image["data"].shape[1]
         # Create new array containing aligned image data.
-        aligned_image_data = np.zeros((image["data"].shape[0]+max_dif[0], image["data"].shape[1]+max_dif[1]))
-        centroid = (image["XCENT"], image["YCENT"])
-        disp = (max_pos[0] - centroid[0], max_pos[1] - centroid[1])
-        aligned_image_data[disp[0]:disp[0]+image["data"].shape[0],disp[1]:disp[1]+image["data"].shape[1]] = image["data"]
+        aligned_image_data = np.zeros((imsize_x+max_dif_x, imsize_y+max_dif_y), dtype=int)
+        aligned_image_data[disp_x:disp_x+imsize_x,disp_y:disp_y+imsize_y] = image["data"]
+        # Create new dictionary value of frames per pixel column (one everywhere for unstacked image).
+        frame_count = np.zeros((imsize_x+max_dif_x, imsize_y+max_dif_y), dtype=int)
+        frame_count[disp_x:disp_x+imsize_x,disp_y:disp_y+imsize_y] = 1
         # Create new image dictionary and copy over header data from image.
-        aligned_image = {}
-        aligned_image["int_time"] = image["int_time"]
-        aligned_image["target"] = image["target"]
-        aligned_image["filename"] = image["filename"]
-        aligned_image["data"] = aligned_image_data
+        aligned_image = {"target"      : image["target"],
+                         "filename"    : image["filename"],
+                         "int_time"    : image["int_time"],
+                         "data"        : aligned_image_data,
+                         "frame_count" : frame_count
+                         }
         # Add the new aligned image dictionary to a list to be returned.
         aligned_images.append(aligned_image)
     print("---Alignment Complete---")
@@ -439,36 +463,46 @@ def stack(aligned_image_stack, **kwargs):
     Returns:
         stacked_image (dict): new combined single frame.
     """
+
+    print("---Stacking Images---")
+
     # Check that the aligned images to be stacked have matching dimensions.
     for image in aligned_image_stack:
         if image["data"].shape != aligned_image_stack[0]["data"].shape:
             print("Aligned image dimensions do not match!")
             break
 
-    # If all dimensions match, initialise an empty array with those dimensions
-    # into which aligned images are stacked.
+    # Initialise an empty array into which aligned images are stacked.
     stacked_image_data = np.zeros(aligned_image_stack[0]["data"].shape)
+    counter = 0
 
     if kwargs.get("correct_exposure") == True:
-        # Initialise array with second axis for storing exposure/pixel.
-        rows, cols = aligned_image_stack[0]["data"].shape
-        total_int_time = np.zeros((rows, cols))
+
+        # Also initialise an empty array into which frames per pixel column are summed.
+        total_frame_count = np.zeros(aligned_image_stack[0]["data"].shape)
+
         for image in aligned_image_stack:
-            # Extract integration time from header and stack the image.
-            total_int_time += int(image["int_time"][:-1])
-            stacked_image_data += image["data"]
-        # Correct the image data for exposure time of each pixel.
-        exposure_corrected_data = np.floor(stacked_image_data / total_int_time)
-        # Create new dict containing exposure corrected stack. Note the int_time
-        # is now an array of exposure times for each pixel!
-        exposure_corrected_stack = {}
-        exposure_corrected_stack["data"] = exposure_corrected_data
+            counter += 1
+            print("---Stacking Image {} of {}".format(counter, len(aligned_image_stack)), end="\r")
+            # Correct the image data for exposure and sum up the fluxes.
+            stacked_image_data += image["data"] / image["int_time"]
+            # Sum up the number of overlapping frames per pixel column.
+            total_frame_count += image["frame_count"]
+        # Replace zeros with ones to prevent zero division error (dodgy!)
+        total_frame_count[np.where(total_frame_count == 0)] = 1
+        # Average each pixel column over the number of frames in that column.
+        stacked_image_data = np.floor(stacked_image_data / total_frame_count)
+        stacked_image_data.astype(dtype=int, copy=False)
+        # Create new dictionary containg the average flux (counts/second/pixel).
+        exposure_corrected_stack = {"data" : stacked_image_data}
+
+        print("---Stacking Complete---")
+
         return(exposure_corrected_stack)
     else:
         for image in aligned_image_stack:
             stacked_image_data += image["data"]
-        stacked_image = {}
-        stacked_image["data"] = stacked_image_data
+        stacked_image = {"data" : stacked_image_data}
         return(stacked_image)
 
 def rgb(image_r, image_g, image_b):
@@ -511,13 +545,18 @@ def reduce_raws(raw_list, master_dark_frame, master_flat_frame, dir):
     print("\nDone!")
     return science_list
 
+def trim(filename):
+    hdul = fits.open(filename)
+    hdul[0].data = np.array(hdul[0].data[300:-300,300:-300])
+    hdul.writeto(filename, overwrite=True)
+
 def get_zero_points(input_airmass):
 
     # bd62_standard_mags = {"r":9.332, "g":9.872, "u":11.44}
     # bd25_standard_mags = {"r":9.929, "g":9.450, "u":9.023}
 
     for band in ["r","g","u"]:
-        counts_and_errs = np.loadtxt("standard_stars/standard_stars_{}.csv".format(band))
+        counts_and_errs = np.loadtxt("standard_stars/std_{}.csv".format(band))
         airmasses = np.array(counts_and_errs[:,3])
         zero_points = counts_and_errs[:,0] + 2.5 * np.log10(counts_and_errs[:,1])
         zero_point_errs = counts_and_errs[:,2] * 2.5 / counts_and_errs[:,1] / np.log(10)
@@ -525,7 +564,7 @@ def get_zero_points(input_airmass):
         gradient = np.sum((airmasses-np.mean(airmasses))*(zero_points-np.mean(zero_points))) / np.sum((airmasses-np.mean(airmasses))**2)
         intercept = np.mean(zero_points) - gradient * np.mean(airmasses)
         zero_point = gradient * input_airmass + intercept
-        print('{} : A = {}X + {}'.format(band,gradient,intercept))
+
         if band == "r": zpr = zero_point
         elif band == "g": zpg = zero_point
         elif band == "u": zpu = zero_point
@@ -562,14 +601,15 @@ def correct_pleiades(p_data):
     p_data[:,2] = p_data[:,2] - 0.544
     return(p_data)
 
-def get_mag(flux, flux_error, zero_point):
+def get_mag(flux, flux_error, zero_point, int_time):
     """
     Recieves the flux of an object, the error on that flux, and an instrumental
     zero point and returns a zero point corrected magnitude and magnitude error
     for the object.
     """
-    mag = -2.5 * np.log10(flux) + zero_point
-    mag_err = (-2.5/flux/np.log(10)) * flux_error
+
+    mag = -2.5 * np.log10(flux/int_time) + zero_point
+    mag_err = (-2.5/flux/int_time/np.log(10)) * flux_error / int_time
     return(mag, mag_err)
 
 def load_cat(filename, zpr, zpg, zpu):
@@ -578,9 +618,9 @@ def load_cat(filename, zpr, zpg, zpu):
     of calatogue fluxes and their errors after zero point correction.
     """
     catalog = np.loadtxt(filename)
-    r_mag, r_err = get_mag(catalog[:,5], catalog[:,6], zpr)
-    g_mag, g_err = get_mag(catalog[:,3], catalog[:,4], zpg)
-    u_mag, u_err = get_mag(catalog[:,7], catalog[:,8], zpu)
+    r_mag, r_err = get_mag(catalog[:,5], catalog[:,6], zpr, 600)
+    g_mag, g_err = get_mag(catalog[:,3], catalog[:,4], zpg, 600)
+    u_mag, u_err = get_mag(catalog[:,7], catalog[:,8], zpu, 800)
     return(r_mag, r_err, g_mag, g_err, u_mag, u_err)
 
 def write_cat(r_mag, g_mag, u_mag, filename):
@@ -638,9 +678,22 @@ def get_chi_squ(x, y, func, coeffs, error):
     that returns the predicted predicted values.
     """
     chi_squ_tot = np.sum(((y - func(x, coeffs)) / error)**2)
-    # expected_y = func(x, coeffs)
-    # chi_squ_tot = np.sum(((y - expected_y)**2)/expected_y)
     return(chi_squ_tot)
+
+def get_sumsqu_res(x, y, func, coeffs):
+    """
+    Returns the sum of squared residuals for a given x,y dataset and a function
+    handle that returns the predicted predicted values.
+    """
+    sum_squ_res = np.sum((y - func(x, coeffs))**2)
+    return(sum_squ_res)
+
+def remove_outliers(x, lower_bound, upper_bound):
+    """
+    Returns the indices of a reduced data set within a given lower and upper bound.
+    """
+    indices = np.where((x >= lower_bound) & (x <= upper_bound))[0]
+    return(indices)
 
 def minimiser(array):
     """
@@ -681,8 +734,16 @@ def cardelli_const(not_gamma):
 def get_cardelli_slope(c_constants):
     return((c_constants["u"]-c_constants["g"])/(c_constants["g"]-c_constants["r"]))
 
-def get_spectral_types(sources):
-    pass
+def convert_spectral_type(data):
+    """
+    Conversion using Jordi et al (2006) equations.
+    """
+    color_u_g = (0.75 * data[:,1]) + (0.77 * data[:,2]) + 0.72
+    color_g_r = (1.646 * data[:,3]) - 0.139
+    new_data = [data[:,0], color_u_g, color_g_r]
+    new_data = np.column_stack(new_data)
+    np.savetxt('SDSS Calibration/spectral_ref.txt', new_data)
+    return(new_data)
 
 def plot_diagram(plts, **kwargs):
     """
